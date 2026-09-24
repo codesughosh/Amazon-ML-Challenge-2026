@@ -37,3 +37,6 @@ sagemaker
 
 requests
 urllib3
+Unidecode
+rapidfuzz
+sparse_dot_topn
