@@ -11,3 +11,10 @@ __pycache__/
 !requirements.txt
 !reference/**/*.csv
 .env
+
+# never commit credentials
+.env
+.env.*
+.aws/
+credentials
+*.pem
