@@ -21,3 +21,8 @@ credentials
 Secret/
 **/accessKeys*
 **/*accessKey*
+*.tsv
+6ab10eb3b23ba_student_resource/
+student_resource/
+eda/
+*.zip
