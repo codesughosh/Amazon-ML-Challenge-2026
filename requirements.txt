@@ -34,3 +34,6 @@ ipywidgets
 
 boto3
 sagemaker
+
+requests
+urllib3

@@ -18,11 +18,16 @@ from sklearn.metrics import f1_score, mean_absolute_error, mean_squared_error
 def smape(y_true, y_pred) -> float:
     """Symmetric MAPE, as a percentage in [0, 200]. Lower is better.
 
-    2025 reference points: winning score 39.7, AIR-80 score 43.28.
+    VERIFIED against the official 2025 problem statement, which defines
 
-    Note the denominator convention: (|A| + |F|) / 2. Some definitions omit
-    the /2 (halving the score). If the problem statement gives a worked
-    example, check against it before trusting this.
+        SMAPE = (1/n) * sum |pred - actual| / ((|actual| + |pred|) / 2)
+
+    and gives the worked example actual=100, pred=120 -> 18.18%. This
+    implementation reproduces that exactly (see the self-check at the bottom
+    of this file). The /2 matters: the convention without it doubles the score.
+
+    2025 reference points: winning 39.7, AIR-80 43.28.
+    Re-verify against the 2026 statement's own example before trusting it.
     """
     y_true = np.asarray(y_true, dtype=np.float64)
     y_pred = np.asarray(y_pred, dtype=np.float64)
@@ -111,6 +116,34 @@ def is_better(name: str, new: float, old: float) -> bool:
 # Gradient-boosting hooks
 # --------------------------------------------------------------------------
 
+def optimal_multiplier(y_true, oof_pred, metric: str = "smape",
+                       lo: float = 0.85, hi: float = 1.25, steps: int = 81):
+    """Find the global scaling factor that minimises the metric on OOF.
+
+    A genuinely free win on relative-error metrics, but only when fitted on
+    out-of-fold predictions. Fit it on train predictions and you are just
+    measuring your own overfitting.
+
+    Returns (best_multiplier, best_score, baseline_score).
+    """
+    y_true = np.asarray(y_true, dtype=np.float64)
+    oof_pred = np.asarray(oof_pred, dtype=np.float64)
+    baseline = score(metric, y_true, oof_pred)
+
+    best_m, best_s = 1.0, baseline
+    for m in np.linspace(lo, hi, steps):
+        s = score(metric, y_true, oof_pred * m)
+        if is_better(metric, s, best_s):
+            best_m, best_s = float(m), s
+
+    gain = abs(best_s - baseline)
+    print(f"multiplier {best_m:.3f}: {metric} {baseline:.5f} -> {best_s:.5f} "
+          f"({gain:.5f} gain)")
+    if gain < 0.01:
+        print("  gain is negligible - skip it, it is probably fold noise")
+    return best_m, best_s, baseline
+
+
 def smape_eval_lgb(y_pred, dataset):
     """LightGBM custom eval: feval=smape_eval_lgb."""
     return "smape", smape(dataset.get_label(), y_pred), False
@@ -122,10 +155,25 @@ def smape_eval_xgb(y_pred, dtrain):
 
 
 if __name__ == "__main__":
-    # Sanity checks. A perfect prediction scores 0; a 2x over-prediction
-    # scores 100*(1/1.5) = 66.67 under the /2 convention.
-    assert abs(smape([100, 200], [100, 200])) < 1e-9
-    assert abs(smape([100.0], [200.0]) - 66.6666667) < 1e-4
-    assert abs(smape([0.0], [0.0])) < 1e-9
-    print("metrics.py self-check passed")
-    print("smape([100],[200]) =", round(smape([100.0], [200.0]), 4))
+    # The official 2025 worked example: actual 100, predicted 120 -> 18.18%.
+    # This is the check that proves the convention is right.
+    assert abs(smape([100.0], [120.0]) - 18.1818) < 1e-3, "official example mismatch"
+
+    assert abs(smape([100, 200], [100, 200])) < 1e-9          # perfect -> 0
+    assert abs(smape([100.0], [200.0]) - 66.6666667) < 1e-4   # 2x over -> 66.67
+    assert abs(smape([0.0], [0.0])) < 1e-9                    # 0/0 -> 0, not NaN
+    assert abs(smape([1.0], [0.0]) - 200.0) < 1e-9            # upper bound
+
+    # SMAPE is NOT symmetric in the error direction, despite the name. For the
+    # same absolute error, UNDER-predicting costs more, because the denominator
+    # shrinks with the prediction:
+    #     actual 100, pred 150 -> 50/125 = 40.00
+    #     actual 100, pred  50 -> 50/ 75 = 66.67
+    # So the SMAPE-optimal point estimate sits slightly ABOVE the conditional
+    # median, and a global multiplier a little over 1.0 is the thing to test.
+    # Sweep it on OOF (see optimal_multiplier) rather than assuming a value.
+    over, under = smape([100.0], [150.0]), smape([100.0], [50.0])
+    assert under > over, "under-prediction should cost more than over-prediction"
+    print(f"over-predicting by 50  -> {over:.2f}")
+    print(f"under-predicting by 50 -> {under:.2f}")
+    print("metrics.py self-check passed (official example reproduced)")

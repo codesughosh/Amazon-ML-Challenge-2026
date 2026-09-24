@@ -20,6 +20,44 @@
 
 ---
 
+## What 2025 actually shipped (confirmed, from `reference/2025/`)
+
+We have last year's real student-resource pack on disk. Expect the same shape.
+**Verify every line of this against the 2026 statement — do not assume it carried over.**
+
+```
+student_resource/
+├── README.md                    <- the problem statement
+├── Documentation_template.md    <- the 1-page doc they grade you on
+├── sample_code.py               <- dummy submission generator
+├── src/utils.py                 <- their (slow) download_images
+└── dataset/
+    ├── train.csv                75k rows: sample_id, catalog_content, image_link, price
+    ├── test.csv                 75k rows: sample_id, catalog_content, image_link
+    ├── sample_test.csv          small input sample
+    └── sample_test_out.csv      EXACT output format: sample_id, price
+```
+
+- `catalog_content` = item title + description + Item Pack Quantity, concatenated
+  into one text blob. Multi-line and quoted, so the CSV has ~600k physical lines
+  for 75k records — never count rows with `wc -l`.
+- `image_link` = public CDN URL, one per row. **150k images to fetch.** Start this
+  in hour 1 with `src.images.download_all` and let it run in the background.
+- Public leaderboard = 25k of the 75k test set. Final = the full 75k plus the doc.
+
+**Two constraints that silently disqualify you:**
+
+1. **Model must be ≤ 8B parameters and MIT / Apache-2.0 licensed.** This rules out
+   a lot of popular checkpoints on licence grounds alone — check `LICENSE` on the
+   model card before you commit to a backbone. Everything in `download_models.py`
+   was picked to satisfy this (DeBERTa-v3 MIT, CLIP MIT, ConvNeXTv2 Apache-2.0).
+2. **No external price/data lookup of any kind** — no scraping, no APIs, no
+   external databases. 2025's wording was explicit that pipelines get reviewed and
+   violations mean immediate disqualification. This is also the clause that makes
+   calling an external LLM API inside your pipeline a bad idea.
+
+---
+
 ## Hour 0–1: triage
 
 Before writing a single model, answer these in a shared doc:
@@ -91,9 +129,12 @@ In descending order of value-per-hour:
    engineering often matters more than your choice of algorithm."
 3. **Seed averaging.** Same architecture, 3 seeds, average. Nearly free variance
    reduction.
-4. **Target post-processing.** Clip to the observed train range. Check whether
-   the metric rewards a small systematic bias (SMAPE rewards under-prediction —
-   test a multiplier between 0.92 and 1.0 on OOF).
+4. **Target post-processing.** Clip to the observed train range, then sweep a
+   global multiplier with `src.metrics.optimal_multiplier` on **OOF** predictions.
+   Note the direction: under SMAPE, *under*-predicting costs more than
+   over-predicting by the same absolute amount (actual 100 → pred 50 scores
+   66.67; pred 150 scores 40.00), so the optimum sits slightly **above** 1.0.
+   Sweep it, don't assume it.
 
 Hyperparameter tuning is near the *bottom* of this list. It is the lowest
 return on a 72-hour clock.

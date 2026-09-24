@@ -75,7 +75,10 @@ def run_cv(
     strictly more robust and costs nothing extra.
     """
     n_splits = int(folds.max()) + 1
-    oof = np.zeros(len(df), dtype=np.float64)
+    # dtype is taken from the first fold's output, so this harness works for
+    # float regression AND for label/string outputs (classification, entity
+    # extraction). A hardcoded float64 array silently mangles the latter.
+    oof = None
     test_preds, fold_scores = [], []
 
     for fold in range(n_splits):
@@ -83,6 +86,14 @@ def run_cv(
         with timer(f"fold {fold}"):
             val_pred, test_pred = fit_predict(
                 df.iloc[tr_idx], df.iloc[va_idx], test_df, fold
+            )
+        val_pred = np.asarray(val_pred)
+        if oof is None:
+            oof = np.zeros(len(df), dtype=val_pred.dtype)
+        if len(val_pred) != len(va_idx):
+            raise ValueError(
+                f"fold {fold}: fit_predict returned {len(val_pred)} predictions "
+                f"for {len(va_idx)} validation rows"
             )
         oof[va_idx] = val_pred
         if test_pred is not None:
@@ -118,17 +129,20 @@ class Tracker:
     def log(self, name: str, oof_score: float, note: str = "") -> None:
         import datetime
 
+        rounded = round(oof_score, 5)
         self.rows.append({
             "time": datetime.datetime.now().strftime("%m-%d %H:%M"),
             "name": name,
-            self.metric: round(oof_score, 5),
+            self.metric: rounded,
             "note": note,
         })
         pd.DataFrame(self.rows).to_csv(self.path, index=False)
         best = (max if GREATER_IS_BETTER[self.metric] else min)(
             r[self.metric] for r in self.rows
         )
-        flag = "  <-- BEST" if oof_score == best else ""
+        # Compare like with like - the stored value is rounded, so comparing the
+        # raw score here would mean the BEST flag almost never fires.
+        flag = "  <-- BEST" if rounded == best else ""
         print(f"logged: {name} = {oof_score:.5f}{flag}")
 
     def leaderboard(self) -> pd.DataFrame:

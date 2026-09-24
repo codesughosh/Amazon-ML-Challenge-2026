@@ -72,8 +72,19 @@ else:
         return f"{tflops:.1f} TFLOPS fp16"
 
     check("fp16 matmul throughput", matmul_bench)
-    check("AMP autocast", lambda: bool(
-        torch.autocast("cuda", dtype=torch.float16).__enter__() is None or True))
+
+    def amp_autocast():
+        # Enter AND exit the context. The previous version called __enter__()
+        # with no matching __exit__(), leaving autocast globally enabled for
+        # every check that ran after it.
+        x = torch.randn(64, 64, device="cuda")
+        with torch.autocast("cuda", dtype=torch.float16):
+            dtype = (x @ x).dtype
+        assert not torch.is_autocast_enabled("cuda"), "autocast leaked out of its context"
+        del x
+        return f"produces {dtype}"
+
+    check("AMP autocast enter/exit", amp_autocast)
 
 
 # ------------------------------------------------- 3. real transformer step
