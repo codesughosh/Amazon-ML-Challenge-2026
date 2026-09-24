@@ -1,0 +1,12 @@
+.venv/
+data/
+models/
+submissions/
+experiments.csv
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.parquet
+*.csv
+!requirements.txt
+.env

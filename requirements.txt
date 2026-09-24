@@ -1,0 +1,36 @@
+# torch + torchvision are installed separately from the CUDA index:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+# Do NOT let plain `pip install torch` run - it pulls the CPU-only build.
+
+numpy
+pandas
+pyarrow
+scikit-learn
+scipy
+
+lightgbm
+xgboost
+catboost
+
+transformers
+tokenizers
+sentencepiece
+accelerate
+datasets
+huggingface_hub
+sentence-transformers
+
+pillow
+opencv-python-headless
+timm
+
+matplotlib
+seaborn
+tqdm
+psutil
+
+jupyterlab
+ipywidgets
+
+boto3
+sagemaker
