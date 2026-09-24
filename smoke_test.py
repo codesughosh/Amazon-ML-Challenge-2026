@@ -170,8 +170,9 @@ check("metrics + CV + submission round-trip", plumbing)
 print("\n[5/5] Resources")
 import shutil
 
-free_gb = shutil.disk_usage("X:\\").free / 1024**3
-print(f"  X: free {free_gb:.1f} GB" + ("" if free_gb > 25 else "   <-- TIGHT"))
+root = __import__("pathlib").Path(__file__).resolve().parent
+free_gb = shutil.disk_usage(root).free / 1024**3
+print(f"  {root.anchor or root} free {free_gb:.1f} GB" + ("" if free_gb > 25 else "   <-- TIGHT"))
 try:
     import psutil
 

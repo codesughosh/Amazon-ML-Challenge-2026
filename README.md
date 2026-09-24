@@ -157,23 +157,29 @@ return on a 72-hour clock.
 
 ## Compute
 
-| Resource | Use it for |
+**Primary: SageMaker.** Full setup, cost math and the two settings that bite you
+are in **[SAGEMAKER.md](SAGEMAKER.md)** — read that before creating the instance.
+
+| Resource | Role |
 |---|---|
-| **RTX 4060 (8 GB)** | Primary. Base transformers, GBDT, all iteration. |
-| **AWS $200 credits** | `ml.g5.xlarge` (A10G 24 GB) when you need bigger batches or parallel runs. ~$1.4/hr. Top 500 get +$100 at the 48h mark. |
-| **Kaggle** | Free fallback, ~30 hrs/week T4×2. Log in tonight. |
+| **SageMaker `ml.g5.xlarge`** (A10G, 24 GB) | **Primary.** ~$1.41/hr → ~$101 for the full 72 h, inside the $200. |
+| **RTX 4060 (8 GB)** | Fallback when credits run out. Halve batch size, DeBERTa-base not large. |
+| **Kaggle** | Second fallback, ~30 hrs/week T4×2. Log in tonight. |
 
-SageMaker free tier is **CPU-only** (`ml.t3.medium`). Any GPU work comes out of
-credits. Request a GPU quota increase *before* you need it — approval is not
-instant. Set a billing alert. Stop notebook instances when idle; delete endpoints
-(they bill ~$0.12/hr even idle).
+Two things to get right before kickoff, both covered in `SAGEMAKER.md`:
 
-**Laptop discipline:** stay plugged in, Windows power mode on Performance. The
-4060 is capped at 95 W and will thermal-throttle across a 72-hour run.
+1. **Volume size 100 GB at creation** — the default is 5 GB and 150k images will
+   not fit. Changing it later requires stopping the instance.
+2. **Quota for `ml.g5.xlarge` *for notebook instance usage*** — a different quota
+   from training-job usage, often 0 on new accounts. Request it now.
 
-**RAM is your tightest resource (15.6 GB).** Use `load_cached` for parquet
-caching and `reduce_mem` on every dataframe. Do not hold train, test, and
-intermediate features in memory at once.
+Credits are **per participant**, so a team of 4 has 4 × $200 across four accounts.
+You cannot pool them, but you can run four experiment branches in parallel. That
+is the biggest free advantage on the table — assign branches before kickoff.
+
+**Laptop fallback discipline:** stay plugged in, Windows power mode on
+Performance (95 W cap, thermal throttling over 72 h), and lean on `load_cached`
+and `reduce_mem` — 15.6 GB of RAM is tighter than the 8 GB of VRAM.
 
 ---
 

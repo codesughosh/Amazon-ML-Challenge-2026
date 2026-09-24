@@ -9,7 +9,9 @@ which keeps them off the system drive.
 import os
 from pathlib import Path
 
-CACHE = Path("X:/hf_cache")
+CACHE = Path(os.environ.get("HF_HOME") or
+             ("/home/ec2-user/SageMaker/hf_cache" if Path("/home/ec2-user/SageMaker").exists()
+              else "X:/hf_cache"))
 CACHE.mkdir(parents=True, exist_ok=True)
 os.environ["HF_HOME"] = str(CACHE)
 
