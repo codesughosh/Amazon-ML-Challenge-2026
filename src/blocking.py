@@ -150,6 +150,50 @@ def candidates(s1: pd.DataFrame, s23: pd.DataFrame,
     return pairs, nkeys.astype(np.int16)
 
 
+def rescore_and_cut(s1: pd.DataFrame, s23: pd.DataFrame,
+                    pairs: np.ndarray, nkeys: np.ndarray,
+                    top_k: int = 50, workers: int = -1):
+    """Re-rank raw candidates by string similarity, then keep the top k per S1.
+
+    Why this exists: measurement showed the rare-token blocker *finds* 93.2% of
+    true S2 pairs across its raw ~300 candidates per entity, but keeping the
+    top 50 by shared-key count retains only 88.9%. The 4.3-point gap is a
+    ranking failure, not a candidate-generation failure - the true pairs are
+    already in the set, just sorted below the cut.
+
+    A full TF-IDF nearest-neighbour *search* would fix the ranking but costs
+    roughly nine hours per source at full scale (measured). Scoring pairs we
+    already have is orders of magnitude cheaper: `rapidfuzz.process.cpdist`
+    runs elementwise over two aligned lists in parallel C++, so this is seconds
+    per million pairs rather than hours.
+
+    Returns (pairs, nkeys, score) filtered to the top k per S1 entity.
+    """
+    from rapidfuzz import fuzz, process
+
+    a1 = s1["addr_n"].to_numpy()[pairs[:, 0]].tolist()
+    a2 = s23["addr_n"].to_numpy()[pairs[:, 1]].tolist()
+    n1 = s1["name_n"].to_numpy()[pairs[:, 0]].tolist()
+    n2 = s23["name_n"].to_numpy()[pairs[:, 1]].tolist()
+
+    # token_set_ratio is the right scorer here: it is insensitive to inserted
+    # or dropped components and to word order, which are exactly the noise
+    # patterns that broke the exact keys.
+    sa = np.asarray(process.cpdist(a1, a2, scorer=fuzz.token_set_ratio,
+                                   workers=workers, dtype=np.float32))
+    sn = np.asarray(process.cpdist(n1, n2, scorer=fuzz.token_set_ratio,
+                                   workers=workers, dtype=np.float32))
+    # Address weighted slightly higher: it survives transliteration, names do not.
+    score = (0.55 * sa + 0.45 * sn).astype(np.float32)
+
+    order = np.lexsort((-score, pairs[:, 0]))
+    pairs, nkeys, score = pairs[order], nkeys[order], score[order]
+    _, starts, counts = np.unique(pairs[:, 0], return_index=True, return_counts=True)
+    keep = np.concatenate([np.arange(s, s + min(c, top_k))
+                           for s, c in zip(starts, counts)])
+    return pairs[keep], nkeys[keep], score[keep]
+
+
 def build_dfreq(*frames: pd.DataFrame) -> tuple[Counter, Counter]:
     """Document frequencies over the pooled shard (all three sources)."""
     da, dn = Counter(), Counter()

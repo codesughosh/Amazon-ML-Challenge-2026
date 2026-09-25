@@ -23,11 +23,14 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from src.blocking import build_dfreq, candidates          # noqa: E402
+from src.blocking import (build_dfreq, candidates,        # noqa: E402
+                          rescore_and_cut)
 from src.er import (apply_assignment, macro_f05,          # noqa: E402
                     select_expected_f05, select_topk_threshold, tune_threshold)
 from src.features import build_features, compute_idf      # noqa: E402
 from src.normalize import add_normalized_columns          # noqa: E402
+from src.tfidf_block import (build_vectorizer,            # noqa: E402
+                             topk_neighbours, union_pairs)
 from src.utils import free, seed_everything, timer        # noqa: E402
 
 DATA = Path(r"X:\Amazon ML Challenge 2026\6ab10eb3b23ba_student_resource\student_resource\dataset")
@@ -51,6 +54,10 @@ def main():
     ap.add_argument("--solo-df", type=int, default=1500)
     ap.add_argument("--val-frac", type=float, default=0.3)
     ap.add_argument("--trees", type=int, default=400)
+    ap.add_argument("--tfidf", action="store_true",
+                    help="union TF-IDF char-ngram neighbours into the candidate set")
+    ap.add_argument("--tfidf-topk", type=int, default=30)
+    ap.add_argument("--tfidf-threshold", type=float, default=0.18)
     a = ap.parse_args()
     seed_everything()
 
@@ -85,15 +92,46 @@ def main():
     print(f"  train entities {(~is_val).sum():,}   val entities {is_val.sum():,}")
 
     # ------------------------------------------------------- candidates
+    vec = None
+    if a.tfidf:
+        def combo(d):
+            return (d["name_n"] + " " + d["addr_n"]).tolist()
+        with timer("fit tfidf"):
+            vec = build_vectorizer(combo(s2) + combo(s3))
+            print(f"    vocab {len(vec.vocabulary_):,}")
+
     blocks = []
     for tag, s23 in (("S2", s2), ("S3", s3)):
         with timer(f"{tag} blocking"):
+            # Generate generously (no cut), then rank by string similarity and
+            # keep the top k. Ranking by shared-key count instead costs 2.6pp
+            # of recall on S2 and 8.1pp on S3, measured.
             pr, nk = candidates(s1, s23, dfa, dfn, max_block=a.max_block,
-                                max_per_s1=a.max_per_s1, n_rare=a.n_rare,
+                                max_per_s1=0, n_rare=a.n_rare,
                                 solo_df=a.solo_df)
-            print(f"    {len(pr):,} pairs ({len(pr)/len(s1):.1f} per S1)")
+            print(f"    raw {len(pr):,} pairs ({len(pr)/len(s1):.0f} per S1)")
+        with timer(f"{tag} rescore"):
+            pr, nk, sim = rescore_and_cut(s1, s23, pr, nk, top_k=a.max_per_s1)
+            print(f"    cut to {len(pr):,} pairs ({len(pr)/len(s1):.1f} per S1)")
+
+        if vec is not None:
+            with timer(f"{tag} tfidf"):
+                pr_tf, _ = topk_neighbours(vec, combo(s1), combo(s23),
+                                           top_k=a.tfidf_topk,
+                                           threshold=a.tfidf_threshold,
+                                           verbose=False)
+                merged = union_pairs(pr, pr_tf)
+                # nkeys is a rare-token statistic; TF-IDF-only pairs get 0.
+                key_of = {(int(x), int(y)): int(k) for (x, y), k in zip(pr, nk)}
+                nk = np.fromiter((key_of.get((int(x), int(y)), 0) for x, y in merged),
+                                 dtype=np.int16, count=len(merged))
+                pr = merged
+                print(f"    + tfidf -> {len(pr):,} pairs ({len(pr)/len(s1):.1f} per S1)")
+                del pr_tf, merged, key_of
+                free()
         with timer(f"{tag} features"):
             X = build_features(s1, s23, pr, nk, idf)
+            X["blk_sim"] = sim   # the ranker's own score is a useful feature
         ids = s23["entity_id"].to_numpy()[pr[:, 1]]
         s1ids = s1["entity_id"].to_numpy()[pr[:, 0]]
         y = np.fromiter((c in truth[s] for s, c in zip(s1ids, ids)),
