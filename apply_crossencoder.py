@@ -23,11 +23,12 @@ import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
-os.environ.setdefault("HF_HOME", "X:/hf_cache")
+os.environ.setdefault("HF_HOME",
+                      os.environ.get("HF_HOME") or str(ROOT / "hf_cache"))
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 sys.path.insert(0, str(ROOT))
 
-DATA = ROOT / "6ab10eb3b23ba_student_resource" / "student_resource" / "dataset"
+from src.paths import DATA  # portable: see src/paths.py
 OUT = ROOT / "output"
 
 

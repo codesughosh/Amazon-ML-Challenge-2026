@@ -47,9 +47,7 @@ def stage(msg: str):
     print()
     print(f"[{bar}] {_STAGE['n']}/{_STAGE['total']}  {msg}", flush=True)
 
-DATA = Path(r"X:\Amazon ML Challenge 2026\6ab10eb3b23ba_student_resource\student_resource\dataset")
-
-
+from src.paths import DATA  # portable: see src/paths.py
 def load(split, source, country=None):
     df = pd.read_csv(DATA / split / f"{split}_source{source}.tsv", sep="\t",
                      dtype=str, keep_default_na=False)

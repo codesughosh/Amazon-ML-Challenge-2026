@@ -19,9 +19,7 @@ from src.normalize import add_normalized_columns          # noqa: E402
 from src.tfidf_block import build_vectorizer, topk_neighbours, union_pairs  # noqa: E402
 from src.utils import free, timer                         # noqa: E402
 
-DATA = Path(r"X:\Amazon ML Challenge 2026\6ab10eb3b23ba_student_resource\student_resource\dataset")
-
-
+from src.paths import DATA  # portable: see src/paths.py
 def load(split, source, country=None):
     df = pd.read_csv(DATA / split / f"{split}_source{source}.tsv", sep="\t",
                      dtype=str, keep_default_na=False)

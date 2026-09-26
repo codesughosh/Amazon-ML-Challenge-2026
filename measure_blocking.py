@@ -23,9 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from src.normalize import add_normalized_columns  # noqa: E402
 from src.utils import timer  # noqa: E402
 
-DATA = Path(r"X:\Amazon ML Challenge 2026\6ab10eb3b23ba_student_resource\student_resource\dataset")
-
-
+from src.paths import DATA  # portable: see src/paths.py
 def load(split: str, source: int, country: str | None) -> pd.DataFrame:
     df = pd.read_csv(DATA / split / f"{split}_source{source}.tsv", sep="\t",
                      dtype=str, keep_default_na=False)

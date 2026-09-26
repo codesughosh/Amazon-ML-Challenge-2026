@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
-DATA = ROOT / "6ab10eb3b23ba_student_resource" / "student_resource" / "dataset"
+from src.paths import DATA  # portable: see src/paths.py
 OUT = ROOT / "output"
 OUT.mkdir(exist_ok=True)
 
