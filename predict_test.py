@@ -152,7 +152,13 @@ def predict_country(a, model, cols, country):
     cands = {s: [] for s in s1_ids}
     # Persisted so a later cross-encoder pass can rescore the uncertain band
     # without repeating blocking, which is the expensive part of this run.
-    keep_s1, keep_cid, keep_p = [], [], []
+    # Written per chunk: accumulating all of them and concatenating at the end
+    # OOMs on a large country (US is 64M pairs) and loses the whole shard.
+    shard_dir = ROOT / "data" / f"scored_{country}"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    for old in shard_dir.glob("*.parquet"):
+        old.unlink()
+    shard_i = 0
 
     n = len(s1)
     bar = tqdm(total=n, desc=f"  {country}", unit="ent", unit_scale=True,
@@ -177,9 +183,12 @@ def predict_country(a, model, cols, country):
             rows_s1.append(pr[:, 0].copy())
             rows_c.append(ids23)
             rows_p.append(p.astype(np.float32))
-            keep_s1.append(chunk["entity_id"].to_numpy()[pr[:, 0]])
-            keep_cid.append(ids23)
-            keep_p.append(p.astype(np.float32))
+            pd.DataFrame({
+                "s1_id": chunk["entity_id"].to_numpy()[pr[:, 0]],
+                "cand_id": ids23,
+                "prob": p.astype(np.float32),
+            }).to_parquet(shard_dir / f"part_{shard_i:04d}.parquet", index=False)
+            shard_i += 1
             # Unique candidate id space across S2/S3 for the assignment step.
             rows_uid.append(pr[:, 1].astype(np.int64) + off * 10_000_000)
 
@@ -206,17 +215,7 @@ def predict_country(a, model, cols, country):
         free()
     bar.close()
 
-    if keep_s1:
-        scored = pd.DataFrame({
-            "s1_id": np.concatenate(keep_s1),
-            "cand_id": np.concatenate(keep_cid),
-            "prob": np.concatenate(keep_p),
-        })
-        sp = ROOT / "data" / f"scored_{country}.parquet"
-        sp.parent.mkdir(parents=True, exist_ok=True)
-        scored.to_parquet(sp, index=False)
-        print(f"    saved {len(scored):,} scored pairs -> {sp.name}", flush=True)
-        del scored, keep_s1, keep_cid, keep_p
+    print(f"    saved {shard_i} scored-pair shards -> {shard_dir.name}/", flush=True)
 
     del s2, s3, indexes
     free()

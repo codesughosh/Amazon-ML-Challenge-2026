@@ -72,11 +72,17 @@ def main():
     all_pred: dict[str, list[str]] = {}
 
     for country in a.countries.split(","):
-        p = ROOT / "data" / f"scored_{country}.parquet"
-        if not p.exists():
-            print(f"  {country}: {p.name} missing, skipping")
+        # Shard directory (new layout) or single file (France, old layout).
+        d = ROOT / "data" / f"scored_{country}"
+        one = ROOT / "data" / f"scored_{country}.parquet"
+        if d.is_dir() and any(d.glob("*.parquet")):
+            df = pd.concat([pd.read_parquet(f) for f in sorted(d.glob("*.parquet"))],
+                           ignore_index=True)
+        elif one.exists():
+            df = pd.read_parquet(one)
+        else:
+            print(f"  {country}: no scored pairs found, skipping")
             continue
-        df = pd.read_parquet(p)
         band = (df["prob"] >= a.lo) & (df["prob"] <= a.hi)
         print(f"\n{country}: {len(df):,} pairs, {band.sum():,} in band "
               f"({band.mean():.1%})")
