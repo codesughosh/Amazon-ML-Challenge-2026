@@ -31,6 +31,18 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:                       # progress bars are optional
+    def tqdm(x=None, **kw):
+        return x if x is not None else _NullBar()
+
+class _NullBar:
+    def update(self, *a): pass
+    def close(self): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+
 _DIGIT_RE = re.compile(r"\d+")
 
 
@@ -91,8 +103,10 @@ def make_keys(df: pd.DataFrame, dfreq_addr: Counter, dfreq_name: Counter,
     name = df["name_n"].to_numpy()
     pin = df["addr_pin"].to_numpy()
 
-    for i in range(len(df)):
-        a = addr[i]
+    rng = tqdm(range(len(df)), desc="  keys   ", unit="rec", unit_scale=True,
+               leave=False, mininterval=0.3, ascii=True, ncols=78)
+    for i in rng:
+        a, nm = addr[i], name[i]
         rare_a = rare_tokens(a, dfreq_addr, n_rare, max_df)
         digs = digit_tokens(a, n_digit)
 
@@ -104,24 +118,61 @@ def make_keys(df: pd.DataFrame, dfreq_addr: Counter, dfreq_name: Counter,
             if pin[i]:
                 idx.append(i); keys.append(f"p|{strip_zeros(pin[i])}|{t}")
 
-        for t in rare_tokens(name[i], dfreq_name, 2, max_df):
+        for t in rare_tokens(nm, dfreq_name, 2, max_df):
             if dfreq_name.get(t, 1) <= solo_df:
                 idx.append(i); keys.append(f"n|{t}")
 
+        # --- families added after diagnosing missed pairs -------------------
+        # (a) Full normalised name. Records whose address is EMPTY are
+        #     otherwise unreachable, and empty addresses are common in S2/S3.
+        #     'mumbai security co' matches exactly across sources but every
+        #     token is too frequent to qualify as a rare key.
+        if nm:
+            idx.append(i); keys.append(f"N|{nm}")
+
+        # (b) Digit signature. Digits survive transliteration and rewriting,
+        #     and two or more of them together are highly discriminating even
+        #     when no alphabetic token is shared.
+        if len(digs) >= 2:
+            idx.append(i); keys.append("D|" + "-".join(sorted(digs)))
+
+        # (c) Digit x name token. Catches transliterated names with a partly
+        #     rewritten address, where the only stable anchors are a house
+        #     number plus one surviving name token.
+        for t in rare_tokens(nm, dfreq_name, 3, max_df):
+            for d in digs[:2]:
+                idx.append(i); keys.append(f"dn|{d}|{t}")
+
     return pd.DataFrame({"i": np.asarray(idx, dtype=np.int32), "k": keys})
+
+
+def prepare_index(s23: pd.DataFrame, dfreq_addr: Counter, dfreq_name: Counter,
+                  max_block: int = 300, **kw) -> pd.DataFrame:
+    """Build the S2/S3 key index once, for reuse across many S1 chunks.
+
+    Key generation over a 2M-record source takes about a minute; at inference
+    we query it with ~17 chunks of S1, so building it once instead of per chunk
+    saves the bulk of the blocking time.
+    """
+    k2 = make_keys(s23, dfreq_addr, dfreq_name, **kw)
+    sz = k2.groupby("k", sort=False)["i"].transform("size")
+    return k2[sz <= max_block].reset_index(drop=True)
 
 
 def candidates(s1: pd.DataFrame, s23: pd.DataFrame,
                dfreq_addr: Counter, dfreq_name: Counter,
                max_block: int = 300, max_per_s1: int = 0,
+               k2: pd.DataFrame | None = None,
                **kw) -> np.ndarray:
-    """Return ((n,2) int32 pairs, (n,) int16 shared-key counts)."""
-    k1 = make_keys(s1, dfreq_addr, dfreq_name, **kw)
-    k2 = make_keys(s23, dfreq_addr, dfreq_name, **kw)
+    """Return ((n,2) int32 pairs, (n,) int16 shared-key counts).
 
-    # Drop keys whose block on the S2/S3 side is too large to be informative.
-    sz = k2.groupby("k", sort=False)["i"].transform("size")
-    k2 = k2[sz <= max_block]
+    Pass `k2` from `prepare_index` to skip rebuilding the S2/S3 key index.
+    """
+    k1 = make_keys(s1, dfreq_addr, dfreq_name, **kw)
+    if k2 is None:
+        k2 = make_keys(s23, dfreq_addr, dfreq_name, **kw)
+        sz = k2.groupby("k", sort=False)["i"].transform("size")
+        k2 = k2[sz <= max_block]
     k1 = k1[k1["k"].isin(k2["k"].unique())]
     if k1.empty or k2.empty:
         return np.empty((0, 2), dtype=np.int32), np.empty(0, dtype=np.int16)
@@ -152,7 +203,8 @@ def candidates(s1: pd.DataFrame, s23: pd.DataFrame,
 
 def rescore_and_cut(s1: pd.DataFrame, s23: pd.DataFrame,
                     pairs: np.ndarray, nkeys: np.ndarray,
-                    top_k: int = 50, workers: int = -1):
+                    top_k: int = 50, workers: int = -1,
+                    chunk: int = 4_000_000):
     """Re-rank raw candidates by string similarity, then keep the top k per S1.
 
     Why this exists: measurement showed the rare-token blocker *finds* 93.2% of
@@ -171,20 +223,45 @@ def rescore_and_cut(s1: pd.DataFrame, s23: pd.DataFrame,
     """
     from rapidfuzz import fuzz, process
 
-    a1 = s1["addr_n"].to_numpy()[pairs[:, 0]].tolist()
-    a2 = s23["addr_n"].to_numpy()[pairs[:, 1]].tolist()
-    n1 = s1["name_n"].to_numpy()[pairs[:, 0]].tolist()
-    n2 = s23["name_n"].to_numpy()[pairs[:, 1]].tolist()
+    A1 = s1["addr_n"].to_numpy()
+    A2 = s23["addr_n"].to_numpy()
+    N1 = s1["name_n"].to_numpy()
+    N2 = s23["name_n"].to_numpy()
 
-    # token_set_ratio is the right scorer here: it is insensitive to inserted
-    # or dropped components and to word order, which are exactly the noise
-    # patterns that broke the exact keys.
-    sa = np.asarray(process.cpdist(a1, a2, scorer=fuzz.token_set_ratio,
-                                   workers=workers, dtype=np.float32))
-    sn = np.asarray(process.cpdist(n1, n2, scorer=fuzz.token_set_ratio,
-                                   workers=workers, dtype=np.float32))
-    # Address weighted slightly higher: it survives transliteration, names do not.
-    score = (0.55 * sa + 0.45 * sn).astype(np.float32)
+    # Scored in chunks. The generous key families produce ~2100 candidates per
+    # entity, so a 25k-entity shard is ~50M pairs; materialising four Python
+    # string lists over all of them needs ~14 GB and OOMs. Chunking keeps peak
+    # memory flat regardless of shard size.
+    score = np.empty(len(pairs), dtype=np.float32)
+    bar = tqdm(total=len(pairs), desc="  rescore", unit="pair",
+               unit_scale=True, leave=False, mininterval=0.3, ascii=True, ncols=78)
+    for lo in range(0, len(pairs), chunk):
+        hi = min(lo + chunk, len(pairs))
+        i1, i2 = pairs[lo:hi, 0], pairs[lo:hi, 1]
+        a1 = A1[i1].tolist(); a2 = A2[i2].tolist()
+        n1 = N1[i1].tolist(); n2 = N2[i2].tolist()
+        c1 = [x + " " + y for x, y in zip(n1, a1)]
+        c2 = [x + " " + y for x, y in zip(n2, a2)]
+
+        # token_set_ratio is insensitive to inserted/dropped components and to
+        # word order - the noise patterns that broke the exact keys.
+        # partial_ratio adds the case where one record is a truncated fragment
+        # of the other, which is what happens when an address is shortened or
+        # emptied; it was worth +2.9pp of top-50 recall on its own (measured).
+        sa = np.asarray(process.cpdist(a1, a2, scorer=fuzz.token_set_ratio,
+                                       workers=workers, dtype=np.float32))
+        sn = np.asarray(process.cpdist(n1, n2, scorer=fuzz.token_set_ratio,
+                                       workers=workers, dtype=np.float32))
+        sc = np.asarray(process.cpdist(c1, c2, scorer=fuzz.token_set_ratio,
+                                       workers=workers, dtype=np.float32))
+        sp = np.asarray(process.cpdist(c1, c2, scorer=fuzz.partial_ratio,
+                                       workers=workers, dtype=np.float32))
+        # Weights from a sweep over ranker variants:
+        #   addr+name 92.33 | combined 93.91 | max 94.20 | this blend 95.18
+        score[lo:hi] = 0.3 * sa + 0.2 * sn + 0.2 * sc + 0.3 * sp
+        del a1, a2, n1, n2, c1, c2, sa, sn, sc, sp
+        bar.update(hi - lo)
+    bar.close()
 
     order = np.lexsort((-score, pairs[:, 0]))
     pairs, nkeys, score = pairs[order], nkeys[order], score[order]

@@ -26,3 +26,5 @@ Secret/
 student_resource/
 eda/
 *.zip
+*.log
+*.pdf

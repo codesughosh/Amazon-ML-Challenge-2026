@@ -135,6 +135,24 @@ def build_features(s1: pd.DataFrame, s23: pd.DataFrame,
     X["margin_to_best"] = (gmax - base).astype(np.float32)
     X["z_in_grp"] = ((base - gmean) / np.maximum(gstd, 1e-6)).astype(np.float32)
 
+    # ---- 4. reverse direction: competition for the CANDIDATE ------------
+    # Each S2/S3 record belongs to at most one S1 entity (verified exactly in
+    # training: 7,638,365 matched IDs, zero reuse). So a candidate that several
+    # S1 entities are competing for is right for at most one of them. Mirroring
+    # the group statistics over the candidate axis tells us whether *this* S1 is
+    # the best claimant - mutual-best pairs are far more likely to be true.
+    gr = pd.DataFrame({"i2": i2, "b": base})
+    grp2 = gr.groupby("i2", sort=False)["b"]
+    X["cand_n_claim"] = grp2.transform("size").to_numpy(dtype=np.float32)
+    c_max = grp2.transform("max").to_numpy(dtype=np.float32)
+    X["cand_rank"] = grp2.rank(ascending=False, method="first").to_numpy(dtype=np.float32)
+    X["cand_ratio_best"] = (base / np.maximum(c_max, 1e-6)).astype(np.float32)
+    X["cand_margin"] = (c_max - base).astype(np.float32)
+    # Mutual best: this S1's top candidate is this record AND this record's top
+    # claimant is this S1. The strongest single signal in classic ER.
+    X["mutual_best"] = ((X["rank"].to_numpy() == 1) &
+                        (X["cand_rank"].to_numpy() == 1)).astype(np.float32)
+
     # Second-best margin: how far clear is the leader? Large gap means the top
     # candidate is unambiguous.
     srt = np.lexsort((-base, i1))

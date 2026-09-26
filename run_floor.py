@@ -29,9 +29,23 @@ from src.er import (apply_assignment, macro_f05,          # noqa: E402
                     select_expected_f05, select_topk_threshold, tune_threshold)
 from src.features import build_features, compute_idf      # noqa: E402
 from src.normalize import add_normalized_columns          # noqa: E402
+from src.singleton import (entity_features,                # noqa: E402
+                           fit_predict as fit_singleton,
+                           tune_singleton_threshold)
 from src.tfidf_block import (build_vectorizer,            # noqa: E402
                              topk_neighbours, union_pairs)
 from src.utils import free, seed_everything, timer        # noqa: E402
+
+_STAGE = {"n": 0, "total": 9}
+
+
+def stage(msg: str):
+    _STAGE["n"] += 1
+    bar_w = 34
+    done = int(bar_w * _STAGE["n"] / _STAGE["total"])
+    bar = "#" * done + "." * (bar_w - done)
+    print()
+    print(f"[{bar}] {_STAGE['n']}/{_STAGE['total']}  {msg}", flush=True)
 
 DATA = Path(r"X:\Amazon ML Challenge 2026\6ab10eb3b23ba_student_resource\student_resource\dataset")
 
@@ -62,6 +76,7 @@ def main():
     seed_everything()
 
     # ---------------------------------------------------------------- data
+    stage("load + normalise")
     with timer("load + normalise"):
         s1 = load("train", 1, a.country)
         if a.sample_s1:
@@ -73,10 +88,12 @@ def main():
             d.drop(columns=["business_name", "business_address", "country"], inplace=True)
         free()
 
+    stage("IDF + document frequencies")
     with timer("idf + document frequencies"):
         dfa, dfn = build_dfreq(s2, s3)
         idf = compute_idf(s2["addr_n"], s3["addr_n"], s2["name_n"], s3["name_n"])
 
+    stage("ground truth")
     with timer("ground truth"):
         gt = pd.read_csv(DATA / "train" / "train_ground_truth.tsv", sep="\t",
                          dtype=str, keep_default_na=False)
@@ -102,6 +119,7 @@ def main():
 
     blocks = []
     for tag, s23 in (("S2", s2), ("S3", s3)):
+        stage(f"{tag} candidate generation")
         with timer(f"{tag} blocking"):
             # Generate generously (no cut), then rank by string similarity and
             # keep the top k. Ranking by shared-key count instead costs 2.6pp
@@ -110,6 +128,7 @@ def main():
                                 max_per_s1=0, n_rare=a.n_rare,
                                 solo_df=a.solo_df)
             print(f"    raw {len(pr):,} pairs ({len(pr)/len(s1):.0f} per S1)")
+        stage(f"{tag} re-rank + cut")
         with timer(f"{tag} rescore"):
             pr, nk, sim = rescore_and_cut(s1, s23, pr, nk, top_k=a.max_per_s1)
             print(f"    cut to {len(pr):,} pairs ({len(pr)/len(s1):.1f} per S1)")
@@ -129,6 +148,7 @@ def main():
                 print(f"    + tfidf -> {len(pr):,} pairs ({len(pr)/len(s1):.1f} per S1)")
                 del pr_tf, merged, key_of
                 free()
+        stage(f"{tag} features")
         with timer(f"{tag} features"):
             X = build_features(s1, s23, pr, nk, idf)
             X["blk_sim"] = sim   # the ranker's own score is a useful feature
@@ -161,6 +181,7 @@ def main():
 
     # ------------------------------------------------------------ model
     import lightgbm as lgb
+    stage("LightGBM + decision layer")
     with timer("lightgbm"):
         m = lgb.LGBMClassifier(
             n_estimators=a.trees, learning_rate=0.08, num_leaves=127,
@@ -172,6 +193,7 @@ def main():
               eval_metric="average_precision",
               callbacks=[lgb.early_stopping(50, verbose=False)])
         p_va = m.predict_proba(X[va_mask])[:, 1]
+        p_tr = m.predict_proba(X[tr_mask])[:, 1]
 
     imp = pd.Series(m.feature_importances_, index=X.columns).sort_values(ascending=False)
     print("\n  top features:")
@@ -220,6 +242,49 @@ def main():
     sc3 = macro_f05(pred3, val_truth)
     print(f"  [3] + expected-F0.5 k     macro F0.5 = {sc3:.4f}  ({sc3-sc2:+.4f})")
     print("=" * 62)
+
+    # ---------------------------------------------------- singleton model
+    sim_all = X["blk_sim"].to_numpy() if "blk_sim" in X else None
+    n_ent = len(s1)
+    Etr = entity_features(i1[tr_mask], p_tr,
+                          sim_all[tr_mask] if sim_all is not None else None, n_ent)
+    Eva = entity_features(i1[va_mask], p_va,
+                          sim_all[va_mask] if sim_all is not None else None, n_ent)
+    ent_ids = s1["entity_id"].to_numpy()
+    y_single = np.array([len(truth[e]) == 0 for e in ent_ids], dtype=np.int8)
+
+    tr_ent = np.where(~is_val)[0]
+    va_ent = np.where(is_val)[0]
+    _, p_single = fit_singleton(Etr.iloc[tr_ent], y_single[tr_ent], Eva.iloc[va_ent])
+
+    from sklearn.metrics import average_precision_score, roc_auc_score
+    print()
+    print(f"  singleton model: AUC {roc_auc_score(y_single[va_ent], p_single):.4f}   "
+          f"AP {average_precision_score(y_single[va_ent], p_single):.4f}   "
+          f"(base rate {y_single[va_ent].mean():.2%})")
+
+    thr_s, sc4, rows = tune_singleton_threshold(p_single, pred, ent_ids[va_ent], val_truth)
+    print(f"  [4] + singleton override  macro F0.5 = {sc4:.4f}  ({sc4-sc2:+.4f})"
+          f"   thr={thr_s:.2f}")
+    for t, s_, n_ in rows[:1] + [r for r in rows if abs(r[0]-thr_s) < 1e-9]:
+        print(f"        thr={t:.2f}  score={s_:.4f}  forced empty={n_:,}")
+    print("=" * 62)
+
+    # ------------------------------------------- where is the loss actually?
+    from src.er import f05_single
+    per = {s: f05_single(pred.get(s, set()), t) for s, t in val_truth.items()}
+    is_single = {s: len(t) == 0 for s, t in val_truth.items()}
+    sing = [v for s, v in per.items() if is_single[s]]
+    matched = [v for s, v in per.items() if not is_single[s]]
+    print(f"\n  SCORE DECOMPOSITION (stage [1] predictions)")
+    print(f"    true singletons : n={len(sing):>6,}  mean F0.5 {np.mean(sing):.4f}  "
+          f"({len(sing)/len(per):.1%} of entities)")
+    print(f"    true matched    : n={len(matched):>6,}  mean F0.5 {np.mean(matched):.4f}")
+    print(f"    predicted empty : {np.mean([len(pred.get(s,set()))==0 for s in val_truth]):.1%}")
+    # Headroom if each group were solved perfectly.
+    w_s, w_m = len(sing)/len(per), len(matched)/len(per)
+    print(f"    headroom: singletons +{w_s*(1-np.mean(sing)):.4f}   "
+          f"matched +{w_m*(1-np.mean(matched)):.4f}")
 
     npred = np.array([len(v) for v in pred3.values()])
     ntrue = np.array([len(v) for v in val_truth.values()])
